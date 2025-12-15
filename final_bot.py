@@ -64,11 +64,17 @@ try:
     k_value = 0.5
     trailing_stop_rate = 0.02
     
+    peak_alert_threshold = 0.03
+    peak_alert_interval_min = 60
+    
     upbit = pyupbit.Upbit(access, secret)
     daily_data = {} 
     holding_status = {}
     high_prices = {} 
     buy_prices = {} 
+    
+    last_peak_alert_price = {} 
+    last_peak_alert_time = {} 
 
     def update_daily_data(ticker):
         try:
@@ -102,25 +108,32 @@ try:
         except:
             return 0
 
-    logger.info("✅ 자동매매 봇 시작 (자산 현황 상세 업데이트 버전)")
-    send_telegram(f"🚀 봇 시스템 시작\n대상: {tickers}")
-
-    # 초기 데이터 로드
+    logger.info("✅ 자동매매 봇 시작 (매도 실패 방어 로직 적용)")
+    
+    start_msg = "🚀 봇 시스템 시작\n[금일 목표가]\n"
     for t in tickers:
         data = update_daily_data(t)
         if data:
             daily_data[t] = data
             symbol = t.split("-")[1]
+            start_msg += f"- {symbol}: {data['target']:,.0f}원\n"
+            
             bal = get_balance_api(symbol)
             curr_p = pyupbit.get_current_price(t)
-            
             if curr_p and bal * curr_p > 5000:
                 holding_status[t] = True
                 avg_buy = upbit.get_avg_buy_price(t)
                 buy_prices[t] = avg_buy
+                
+                high_prices[symbol] = curr_p
+                last_peak_alert_price[symbol] = curr_p
+                last_peak_alert_time[symbol] = datetime.datetime.now()
+                
                 logger.info(f" - [{t}] 보유 중 (평단가: {avg_buy:,.0f}원)")
             else:
                 holding_status[t] = False
+    
+    send_telegram(start_msg)
 
     # =========================================================
     # [4. 무한 루프]
@@ -142,6 +155,9 @@ try:
                             daily_data[t] = new_data
                             symbol = t.split("-")[1]
                             if symbol in high_prices: del high_prices[symbol]
+                            if symbol in last_peak_alert_price: del last_peak_alert_price[symbol]
+                            if symbol in last_peak_alert_time: del last_peak_alert_time[symbol]
+                            
                             target_msg += f"- {symbol}: {new_data['target']:,.0f}원\n"
                     send_telegram(target_msg)
 
@@ -162,6 +178,7 @@ try:
 
                 # [Phase A] 장 중
                 if start_time < now < end_time - datetime.timedelta(seconds=10):
+                    
                     # (1) 매수 시도
                     if not is_holding:
                         if current_price > target_price and current_price > ma5:
@@ -180,36 +197,59 @@ try:
                                         if bal * current_price > 5000:
                                             holding_status[ticker] = True
                                             high_prices[symbol] = current_price
+                                            last_peak_alert_price[symbol] = current_price
+                                            last_peak_alert_time[symbol] = now 
                                             avg_buy_price = upbit.get_avg_buy_price(ticker)
                                             buy_prices[ticker] = avg_buy_price
+                                            initial_stop = current_price * (1 - trailing_stop_rate)
                                             
-                                            # [요청 1] 매수 성공 시 수량/총액 제외, 심플하게 전송
                                             msg = (f"✅ [매수 성공] {symbol}\n"
                                                    f"매수가: {avg_buy_price:,.0f}원\n"
-                                                   f"목표가: {target_price:,.0f}원")
+                                                   f"목표가: {target_price:,.0f}원\n"
+                                                   f"매도기준: {initial_stop:,.0f}원 (현재가 -2%)")
                                             logger.info(msg)
                                             send_telegram(msg)
-                                            trade_happened_in_loop = True 
+                                            trade_happened_in_loop = True
                                         else:
-                                            msg = (f"❌ [매수 실패] {symbol}\n원인: 잔고 부족 또는 취소")
+                                            msg = (f"❌ [매수 실패] {symbol}\n원인: 잔고 부족")
                                             logger.warning(msg)
                                             send_telegram(msg)
 
-                    # (2) 매도 시도 (트레일링 스탑)
+                    # (2) 트레일링 스탑 관리 및 고점 갱신 알림
                     if is_holding:
                         if symbol not in high_prices or current_price > high_prices[symbol]:
                             high_prices[symbol] = current_price
                         
+                        last_peak = last_peak_alert_price.get(symbol, buy_prices.get(ticker, 0))
+                        price_condition = current_price > last_peak * (1 + peak_alert_threshold)
+                        last_time = last_peak_alert_time.get(symbol, datetime.datetime.min)
+                        time_condition = (now - last_time).total_seconds() > (peak_alert_interval_min * 60)
+
+                        if price_condition and time_condition:
+                            new_stop_price = current_price * (1 - trailing_stop_rate)
+                            msg = (f"📈 [{symbol} 고점 갱신] 분위기 좋습니다!\n"
+                                   f"현재가: {current_price:,.0f}원 (직전대비 +3%↑)\n"
+                                   f"새로운 매도기준: {new_stop_price:,.0f}원")
+                            logger.info(msg)
+                            send_telegram(msg)
+                            last_peak_alert_price[symbol] = current_price
+                            last_peak_alert_time[symbol] = now
+
                         highest = high_prices[symbol]
                         stop_price = highest * (1 - trailing_stop_rate)
                         
+                        # 하락 시 매도 (방어 로직 적용됨)
                         if current_price < stop_price:
                             bal = get_balance_api(symbol)
                             if bal > 0:
                                 upbit.sell_market_order(ticker, bal)
-                                time.sleep(1)
+                                time.sleep(1) # 체결 대기
                                 
-                                if get_balance_api(symbol) * current_price < 5000:
+                                # [핵심] 잔고가 진짜 없어졌는지 재확인
+                                remaining_bal = get_balance_api(symbol)
+                                
+                                if remaining_bal * current_price < 5000:
+                                    # 진짜 팔림 -> 상태 변경
                                     holding_status[ticker] = False
                                     avg_buy = buy_prices.get(ticker, 0)
                                     profit_rate = (current_price - avg_buy) / avg_buy * 100 if avg_buy > 0 else 0
@@ -225,8 +265,13 @@ try:
                                     logger.info(msg)
                                     send_telegram(msg)
                                     trade_happened_in_loop = True
+                                else:
+                                    # 안 팔림 -> 상태 유지 (다음 루프에서 다시 시도)
+                                    msg = f"⚠️ [{symbol}] 매도 주문 실패! 잔고가 남아있어 재시도합니다."
+                                    logger.warning(msg)
+                                    send_telegram(msg)
                 
-                # [Phase B] 장 마감 직전 청산
+                # [Phase B] 장 마감 직전 청산 (방어 로직 적용됨)
                 else:
                     if is_holding:
                         bal = get_balance_api(symbol)
@@ -234,35 +279,40 @@ try:
                             avg_buy = buy_prices.get(ticker, 0)
                             upbit.sell_market_order(ticker, bal)
                             time.sleep(1)
-                            holding_status[ticker] = False
                             
-                            profit_rate = (current_price - avg_buy) / avg_buy * 100 if avg_buy > 0 else 0
-                            profit_money = (current_price - avg_buy) * bal if avg_buy > 0 else 0
-                            sell_total = bal * current_price
+                            # [핵심] 잔고 재확인
+                            remaining_bal = get_balance_api(symbol)
                             
-                            msg = (f"🏁 [장 마감 청산] {symbol}\n"
-                                   f"매도가: {current_price:,.0f}원\n"
-                                   f"수익률: {profit_rate:,.2f}%\n"
-                                   f"손익금: {profit_money:,.0f}원\n"
-                                   f"총매도액: {sell_total:,.0f}원")
-                            
-                            logger.info(msg)
-                            send_telegram(msg)
-                            trade_happened_in_loop = True
+                            if remaining_bal * current_price < 5000:
+                                holding_status[ticker] = False
+                                profit_rate = (current_price - avg_buy) / avg_buy * 100 if avg_buy > 0 else 0
+                                profit_money = (current_price - avg_buy) * bal if avg_buy > 0 else 0
+                                sell_total = bal * current_price
+                                
+                                msg = (f"🏁 [장 마감 청산] {symbol}\n"
+                                       f"매도가: {current_price:,.0f}원\n"
+                                       f"수익률: {profit_rate:,.2f}%\n"
+                                       f"손익금: {profit_money:,.0f}원\n"
+                                       f"총매도액: {sell_total:,.0f}원")
+                                
+                                logger.info(msg)
+                                send_telegram(msg)
+                                trade_happened_in_loop = True
+                            else:
+                                # 안 팔림 -> 다음 루프에서 재시도
+                                logger.warning(f"⚠️ [{symbol}] 장 마감 청산 실패. 잔고 남음. 재시도 예정.")
                 
                 time.sleep(0.2)
             
-            # [요청 2] 거래 발생 시 자산 현황 상세 리포트
+            # [자산 현황 업데이트] 매매 발생 시
             if trade_happened_in_loop:
-                time.sleep(1) # 잔고 반영 대기
+                time.sleep(1)
                 krw_bal = get_balance_api("KRW")
                 
-                # 자산 현황 메시지 빌더
                 report_msg = "💰 [자산 현황 업데이트]\n"
                 report_msg += f"현금: {krw_bal:,.0f}원\n"
                 
                 total_estimated_assets = krw_bal
-                
                 for t in tickers:
                     sym = t.split("-")[1]
                     qty = get_balance_api(sym)
@@ -274,7 +324,6 @@ try:
                 
                 report_msg += f"──────────────\n"
                 report_msg += f"총 추정 자산: {total_estimated_assets:,.0f}원"
-                
                 logger.info(report_msg)
                 send_telegram(report_msg)
 

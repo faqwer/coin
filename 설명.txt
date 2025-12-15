@@ -1,0 +1,16 @@
+rm 파일명 - 파일 삭제
+nano 파일명 - 텍스트 편집
+tail -f 파일명 - 파일 확인
+ps -ef - 생존 확인 (리스트에 final_bot.py 확인)
+
+로그 
+autotrade.log - 5MB 차면 옛정보 지우게 해둠
+nohup.out - 시스템이 만든거 가끔 리셋 시켜줘야함 용량 무제한
+ls -lh autotrade.log nohup.out - 용량크기 확인
+로그 확인 명령어
+tail -f autotrade.log
+tail -f nohup.out
+
+py final_bot.py - 윈도우 테스트 실행
+nohup python3 -u final_bot.py & - 백그라운드 윈도우 24시간 실행
+pkill -f final_bot.py - 종료 명령어

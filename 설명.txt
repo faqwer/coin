@@ -1,3 +1,5 @@
+리눅스
+
 rm 파일명 - 파일 삭제
 nano 파일명 - 텍스트 편집
 tail -f 파일명 - 파일 확인
@@ -14,3 +16,25 @@ tail -f nohup.out
 py final_bot.py - 윈도우 테스트 실행
 nohup python3 -u final_bot.py & - 백그라운드 윈도우 24시간 실행
 pkill -f final_bot.py - 종료 명령어
+
+-----------------------------------------------------------------------------
+
+github
+
+1. 파일추가
+git status
+2. 파일을 스테이징 영역에 추가 (버전 관리 시작)
+git add .
+3. 커밋
+git commit -m "Your commit message"
+(feat: 기능 추가, fix: 버그수정, docs: 문서수정, refactor: 코드 수정)
+4. 푸쉬
+git push origin main
+
+1. 풀
+git pull origin main
+
+git checkout main
+git branch -d master
+git push -u origin main
+git branch
